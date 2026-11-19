@@ -108,6 +108,7 @@ func (p *Producer) watchTracks(ctx context.Context, cancel context.CancelFunc, s
 	videoAt, audioAt := time.Now(), time.Now()
 	received, receivedAt := p.recvBytes.Load(), time.Now()
 	rate := audioRateWindow{at: time.Now(), samples: audio, video: p.videoRate.Load(), videoSet: video != 0}
+	audioStallNoted := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -124,14 +125,25 @@ func (p *Producer) watchTracks(ctx context.Context, cancel context.CancelFunc, s
 					received, receivedAt = bytes, now
 				}
 			}
+			audioStalled := p.audio != nil && now.Sub(audioAt) >= p.trackStallTimeout
+			if !audioStalled {
+				audioStallNoted = false
+			}
 			var err error
 			if rawOnly && now.Sub(receivedAt) >= p.trackStallTimeout {
 				err = mediaErrorf("reolink: media stream stalled")
 			} else if p.video != nil && now.Sub(videoAt) >= p.trackStallTimeout {
 				err = mediaErrorf("reolink: video track stalled")
-			} else if p.audio != nil && now.Sub(audioAt) >= p.trackStallTimeout {
+			} else if audioStalled && p.video == nil {
 				err = mediaErrorf("reolink: audio track stalled")
-			} else if p.audio != nil && p.checkAudioRate(now, video, &rate) {
+			} else if audioStalled {
+				// Video still flows: keep it. The audio clock re-anchors to video at the
+				// next keyframes once audio returns.
+				if !audioStallNoted {
+					audioStallNoted = true
+					p.noteAudioStall()
+				}
+			} else if p.audio != nil && p.checkAudioRate(now, video, &rate) && p.video == nil {
 				err = errAudioRateBelowExpected
 			}
 			if err != nil {
@@ -146,4 +158,14 @@ func (p *Producer) watchTracks(ctx context.Context, cancel context.CancelFunc, s
 func audioRateLow(samples uint64, rate uint32, elapsed time.Duration) bool {
 	expected := uint64(rate) * uint64(elapsed) / uint64(time.Second)
 	return samples < expected-expected/4
+}
+
+func (p *Producer) noteAudioStall() {
+	p.audioStalls.Add(1)
+	if p.camera == nil || p.camera.registry == nil {
+		return
+	}
+	p.camera.registry.log.Warn().Str("camera", p.camera.remote).Uint8("channel", p.key.Channel).
+		Str("profile", string(p.key.Stream)).Uint64("generation", p.generation).
+		Msg("reolink audio stalled; video continues")
 }

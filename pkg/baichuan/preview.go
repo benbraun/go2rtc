@@ -6,9 +6,13 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const previewQueueMessages = 256
+const (
+	previewQueueMessages = 256
+	previewAbortTimeout  = time.Second
+)
 
 func (c *Client) StartPreview(ctx context.Context, channel uint8, stream Stream) (*Preview, error) {
 	return c.StartPreviewHistory(ctx, channel, stream, 0)
@@ -56,7 +60,7 @@ func (c *Client) addPreview(p *Preview) error {
 	c.previewMu.Lock()
 	defer c.previewMu.Unlock()
 	if _, ok := c.previews[p.key]; ok {
-		return fmt.Errorf("baichuan: preview already active for channel %d stream %d", p.key.channel, p.key.stream)
+		return fmt.Errorf("%w for channel %d stream %d", ErrPreviewActive, p.key.channel, p.key.stream)
 	}
 	c.previews[p.key] = p
 	return nil
@@ -221,6 +225,12 @@ func (p *Preview) closeLocal(err error) {
 }
 
 func (p *Preview) Close() error {
+	return p.CloseContext(p.client.ctx)
+}
+
+// CloseContext stops the preview and waits for the camera to acknowledge it.
+// Canceling ctx abandons the wait without closing the connection.
+func (p *Preview) CloseContext(ctx context.Context) error {
 	p.stop.Do(func() {
 		p.closeLocal(context.Canceled)
 		if p.client.ctx.Err() != nil {
@@ -231,13 +241,38 @@ func (p *Preview) Close() error {
 			p.stopErr = err
 			return
 		}
-		ctx, cancel := context.WithTimeout(p.client.ctx, p.client.cfg.Timeout)
+		ctx, cancel := context.WithTimeout(ctx, p.client.cfg.Timeout)
 		defer cancel()
 		_, err = p.client.roundTrip(ctx, request{
 			command: commandStopPreview, channel: p.key.channel, stream: p.key.stream,
 			class: classOffset, payload: body,
 		})
 		if err != nil {
+			p.stopErr = fmt.Errorf("baichuan: stop preview: %w", err)
+		}
+	})
+	return p.stopErr
+}
+
+// Abort stops local delivery at once and sends the stop request without
+// waiting for an answer, so a shared connection keeps serving other previews.
+func (p *Preview) Abort() error {
+	p.stop.Do(func() {
+		p.closeLocal(context.Canceled)
+		if p.client.ctx.Err() != nil {
+			return
+		}
+		body, err := buildStopPreview(p.key.channel, p.handle)
+		if err != nil {
+			p.stopErr = err
+			return
+		}
+		ctx, cancel := context.WithTimeout(p.client.ctx, previewAbortTimeout)
+		defer cancel()
+		if err = p.client.writeRequest(ctx, request{
+			command: commandStopPreview, channel: p.key.channel, stream: p.key.stream,
+			class: classOffset, payload: body,
+		}); err != nil {
 			p.stopErr = fmt.Errorf("baichuan: stop preview: %w", err)
 		}
 	})

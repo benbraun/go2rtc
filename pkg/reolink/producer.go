@@ -135,6 +135,8 @@ type profileDiagnostics struct {
 	BoundaryAdjust  uint64   `json:"boundary_adjustments"`
 	VideoShort      uint64   `json:"short_video_units"`
 	VideoRecoveries uint64   `json:"video_resyncs"`
+	AudioResyncs    uint64   `json:"audio_resyncs"`
+	AudioStalls     uint64   `json:"audio_stalls"`
 	RefetchAttempts uint64   `json:"refetch_attempts,omitempty"`
 	RefetchResumes  uint64   `json:"refetch_resumes,omitempty"`
 	RefetchEnabled  bool     `json:"refetch_enabled,omitempty"`
@@ -160,6 +162,8 @@ func (p *Producer) diagnostics() profileDiagnostics {
 		DeviceInfo: p.discovery.deviceStatus, CapabilityInfo: p.discovery.capabilityStatus,
 		Channels:        channels,
 		VideoRecoveries: p.videoResyncs.Load(),
+		AudioResyncs:    p.audioResyncs.Load(),
+		AudioStalls:     p.audioStalls.Load(),
 		LastError:       p.errClass,
 	}
 	if p.pipeline.audioMedia != nil {

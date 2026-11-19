@@ -54,10 +54,10 @@ func (p *Producer) probe(input profileInput) (mediaProbe, error) {
 		}
 		if packet.Kind == baichuan.MediaDiscontinuity {
 			probe.reset()
-			videoResyncs := p.pipeline.videoResyncs
+			videoResyncs, audioResyncs := p.pipeline.videoResyncs, p.pipeline.audioResyncs
 			p.pipeline = mediaPipeline{epoch: p.pipeline.epoch,
 				sharedClock: p.pipeline.sharedClock, videoOnly: p.pipeline.videoOnly,
-				videoResyncs: videoResyncs}
+				videoResyncs: videoResyncs, audioResyncs: audioResyncs}
 			p.invalidateVideoRate()
 			continue
 		}
@@ -145,23 +145,69 @@ type baichuanInput struct {
 	discovery discoverySnapshot
 	once      sync.Once
 	err       error
+
+	// Set when the preview rides the camera's shared connection.
+	registry    *Registry
+	shared      *sharedClient
+	closeCtx    context.Context
+	cancelClose context.CancelFunc
 }
 
-func openBaichuan(ctx context.Context, _ *Camera, s source) (profileInput, error) {
+func openBaichuan(ctx context.Context, camera *Camera, s source) (profileInput, error) {
+	var registry *Registry
+	if camera != nil {
+		registry = camera.registry
+	}
+	if registry != nil && s.protocol == "tcp" && !s.dedicated {
+		shared, err := registry.acquireClient(ctx, camera.key, s.remote, s.config)
+		if err == nil {
+			input, err := startInput(ctx, shared.client, s)
+			if err == nil {
+				input.registry, input.shared = registry, shared
+				input.closeCtx, input.cancelClose = context.WithCancel(context.Background())
+				return input, nil
+			}
+			registry.releaseClient(shared)
+			if !errors.Is(err, baichuan.ErrPreviewActive) {
+				return nil, err
+			}
+			// The same profile is already open on the shared connection.
+		} else if !errors.Is(err, errNotShareable) {
+			return nil, err
+		}
+	}
+
+	if registry != nil {
+		if err := registry.checkBackoff(camera.key); err != nil {
+			return nil, err
+		}
+	}
 	client, err := baichuan.Dial(ctx, s.config)
 	if err != nil {
 		return nil, err
 	}
-	if err = client.Login(ctx); err != nil {
+	err = client.Login(ctx)
+	if registry != nil {
+		registry.noteLogin(camera.key, s.remote, err)
+	}
+	if err != nil {
 		return nil, errors.Join(err, client.Close())
 	}
+	input, err := startInput(ctx, client, s)
+	if err != nil {
+		return nil, errors.Join(err, client.Close())
+	}
+	return input, nil
+}
+
+func startInput(ctx context.Context, client *baichuan.Client, s source) (*baichuanInput, error) {
 	var discovery discoverySnapshot
 	if s.preRecord == 0 {
 		discovery = discover(ctx, client, s.channel)
 	}
 	preview, err := client.StartPreviewHistory(ctx, s.channel, s.stream, s.preRecord)
 	if err != nil {
-		return nil, errors.Join(err, client.Close())
+		return nil, err
 	}
 	return &baichuanInput{client: client, preview: preview, discovery: discovery}, nil
 }
@@ -232,12 +278,28 @@ func (i *baichuanInput) StartTalk(ctx context.Context, channel uint8) (talkSessi
 
 func (i *baichuanInput) Close() error {
 	i.once.Do(func() {
+		if i.shared != nil {
+			// Stop only this preview; the connection stays up for the camera's other sources.
+			i.err = i.preview.CloseContext(i.closeCtx)
+			i.cancelClose()
+			i.registry.releaseClient(i.shared)
+			return
+		}
 		i.err = errors.Join(i.preview.Close(), i.client.Close())
 	})
 	return i.err
 }
 
 func (i *baichuanInput) Abort() error {
+	if i.shared != nil {
+		// Interrupt an in-flight graceful stop without closing the shared connection.
+		i.cancelClose()
+		i.once.Do(func() {
+			i.err = i.preview.Abort()
+			i.registry.releaseClient(i.shared)
+		})
+		return i.err
+	}
 	// Interrupt an in-flight graceful close before waiting on its once barrier.
 	err := i.client.Close()
 	i.once.Do(func() {

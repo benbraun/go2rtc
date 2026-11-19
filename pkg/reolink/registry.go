@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"hash"
 	"sync"
+	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/baichuan"
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/rs/zerolog"
 )
@@ -25,6 +27,12 @@ type Registry struct {
 	secret  [sha256.Size]byte
 	open    profileOpener
 	log     zerolog.Logger
+
+	connMu  sync.Mutex
+	clients map[cameraKey]*sharedClient
+	backoff map[cameraKey]*loginBackoff
+	clock   func() time.Time
+	dial    func(context.Context, baichuan.Config, func(error)) (*baichuan.Client, error)
 }
 
 func (r *Registry) Format(state fmt.State, _ rune) {
@@ -43,6 +51,7 @@ func newRegistry(log zerolog.Logger, secret [sha256.Size]byte, open profileOpene
 	return &Registry{
 		cameras: make(map[cameraKey]*Camera), secret: secret,
 		open: open, log: log,
+		clients: make(map[cameraKey]*sharedClient), backoff: make(map[cameraKey]*loginBackoff),
 	}
 }
 
@@ -154,9 +163,11 @@ func (r *Registry) release(profile *Producer) {
 	}
 	profile.released = true
 	if profile.camera.refs == 0 {
-		panic("reolink: camera reference accounting underflow")
+		// A bookkeeping bug must not take down every other stream in the process.
+		r.log.Error().Str("camera", profile.camera.remote).Msg("reolink camera reference accounting underflow")
+	} else {
+		profile.camera.refs--
 	}
-	profile.camera.refs--
 	if _, ok := profile.camera.profiles[profile]; ok {
 		delete(profile.camera.profiles, profile)
 		if profile.state == profileStarting || profile.state == profileActive {

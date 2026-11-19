@@ -64,6 +64,7 @@ type mediaPipeline struct {
 	epoch        mediaEpoch
 	sharedClock  bool
 	videoResyncs *atomic.Uint64
+	audioResyncs *atomic.Uint64
 
 	videoCodec     string
 	videoParams    string
@@ -245,13 +246,15 @@ func (m *mediaPipeline) videoFrame(packet baichuan.MediaPacket) (mediaFrame, err
 			return mediaFrame{}, nil
 		}
 	}
-	var gapErr error
-	if skew, ahead := m.videoAheadOfAAC(); ahead {
+	if _, ahead := m.videoAheadOfAAC(); ahead {
 		if packet.Kind == baichuan.MediaVideoI {
 			if m.aacGap == 0 {
 				m.aacGap = m.videoTS.value
 			} else if m.videoTS.value != m.aacGap {
-				gapErr = mediaErrorf("reolink: video ahead of AAC by %d ticks", skew)
+				// AAC lost time (dropped frames or a stall). Move the audio clock up to
+				// the video clock: consumers get a short audio gap, and video keeps
+				// running instead of the whole source reconnecting.
+				m.resyncAudio()
 			}
 		}
 	} else {
@@ -267,7 +270,15 @@ func (m *mediaPipeline) videoFrame(packet baichuan.MediaPacket) (mediaFrame, err
 	return mediaFrame{
 		track:  trackVideo,
 		packet: &rtp.Packet{Header: rtp.Header{Timestamp: timestamp}, Payload: payload},
-	}, gapErr
+	}, nil
+}
+
+func (m *mediaPipeline) resyncAudio() {
+	m.audioTS = max(m.audioTS, rescaleTimestampCeil(m.videoTS.value, 90000, m.audioRate))
+	m.aacGap = 0
+	if m.audioResyncs != nil {
+		m.audioResyncs.Add(1)
+	}
 }
 
 func (m *mediaPipeline) videoAheadOfAAC() (uint64, bool) {

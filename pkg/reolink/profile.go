@@ -101,6 +101,8 @@ type Producer struct {
 	videoRate      atomic.Uint64
 	videoRateEpoch uint32 // Odd until an accepted recovery frame anchors the video rate.
 	videoResyncs   atomic.Uint64
+	audioResyncs   atomic.Uint64
+	audioStalls    atomic.Uint64
 
 	trackCheckInterval time.Duration
 	trackStallTimeout  time.Duration
@@ -129,6 +131,7 @@ func newProducer(
 	}
 	p.producerFormat = producerFormat{connection: &p.Connection, key: key, generation: generation}
 	p.pipeline.videoResyncs = &p.videoResyncs
+	p.pipeline.audioResyncs = &p.audioResyncs
 	return p
 }
 

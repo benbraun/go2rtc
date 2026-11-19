@@ -3,7 +3,6 @@ package reolink
 import (
 	"bytes"
 	"encoding/binary"
-	"strings"
 	"testing"
 
 	"github.com/AlexxIT/go2rtc/pkg/aac"
@@ -119,9 +118,10 @@ func TestProfileAACVideoCoherence(t *testing.T) {
 				if recover && (err != nil || !frame.valid() || m.videoResync || m.videoPending.set || m.videoTS == beforeConfirm) {
 					t.Fatalf("AAC catchup did not clear the gap: %v %v", frame, err)
 				}
-				if !recover && (err == nil || !frame.valid() || m.videoTS == clock || m.audioTS != audio ||
-					!strings.Contains(err.Error(), "video ahead of AAC")) {
-					t.Fatalf("distinct full keyframe did not forward then fail: %v %v", frame, err)
+				if !recover && (err != nil || !frame.valid() || m.videoTS == clock || m.aacGap != 0 ||
+					m.audioTS <= audio || m.audioTS < rescaleTimestampCeil(m.videoTS.value, 90000, m.audioRate) ||
+					p.audioResyncs.Load() != 1) {
+					t.Fatalf("persistent gap did not re-anchor AAC to video: %v %v", frame, err)
 				}
 			})
 		}
@@ -164,7 +164,7 @@ func TestAACGapKeepsLatestVideoEvidenceAcrossInvalidVideo(t *testing.T) {
 		t.Fatalf("AAC clock did not advance by valid sample units: %d", m.audioTS)
 	}
 	frame, err := m.frame(testH264Keyframe(5_050_002))
-	if err == nil || !frame.valid() || !strings.Contains(err.Error(), "video ahead of AAC") {
+	if err != nil || !frame.valid() || m.aacGap != 0 || m.audioTS < rescaleTimestampCeil(m.videoTS.value, 90000, m.audioRate) {
 		t.Fatalf("AAC progress ignored the latest accepted P: frame=%v err=%v", frame, err)
 	}
 
@@ -197,7 +197,8 @@ func TestAACGapKeepsLatestVideoEvidenceAcrossInvalidVideo(t *testing.T) {
 	if frame, err = m.frame(bareI(8_050_002)); err != nil || !frame.valid() {
 		t.Fatalf("new ahead bare I was not accepted: frame=%v err=%v", frame, err)
 	}
-	if frame, err = m.frame(bareI(8_100_002)); err == nil || !frame.valid() || !strings.Contains(err.Error(), "video ahead of AAC") {
-		t.Fatalf("new persistent gap did not confirm on a distinct bare I: frame=%v err=%v", frame, err)
+	if frame, err = m.frame(bareI(8_100_002)); err != nil || !frame.valid() || m.aacGap != 0 ||
+		m.audioTS < rescaleTimestampCeil(m.videoTS.value, 90000, m.audioRate) {
+		t.Fatalf("new persistent gap did not re-anchor on a distinct bare I: frame=%v err=%v", frame, err)
 	}
 }

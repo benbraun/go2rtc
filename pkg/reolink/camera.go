@@ -110,15 +110,17 @@ func (c *Camera) addSession(stream baichuan.Stream) {
 }
 
 func (c *Camera) removeSession(stream baichuan.Stream) {
+	counter := &c.otherSessions
 	if stream == baichuan.StreamMain {
-		if c.mainSessions == 0 {
-			panic("reolink: main session accounting underflow")
+		counter = &c.mainSessions
+	}
+	if *counter == 0 {
+		// A bookkeeping bug must not take down every other stream in the process.
+		if c.registry != nil {
+			c.registry.log.Error().Str("camera", c.remote).Str("profile", string(stream)).
+				Msg("reolink session accounting underflow")
 		}
-		c.mainSessions--
 		return
 	}
-	if c.otherSessions == 0 {
-		panic("reolink: other session accounting underflow")
-	}
-	c.otherSessions--
+	*counter--
 }

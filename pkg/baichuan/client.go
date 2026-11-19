@@ -12,6 +12,10 @@ import (
 
 var ErrPreviewOverflow = errors.New("baichuan: preview queue overflow")
 
+// ErrPreviewActive reports that this connection already carries the requested
+// channel and stream; a second preview of it needs its own connection.
+var ErrPreviewActive = errors.New("baichuan: preview already active")
+
 type pendingKey struct {
 	command  uint32
 	sequence uint16
@@ -421,7 +425,10 @@ func (c *Client) keepAliveStep(failures *int, lastPackets *uint64) bool {
 	packets := c.mediaPackets.Load()
 	if err == nil {
 		*failures = 0
-	} else if errors.Is(err, context.DeadlineExceeded) && packets != *lastPackets {
+	} else if packets != *lastPackets && c.ctx.Err() == nil && !authRejection(err) {
+		// Media still arriving proves the session is alive, whether the ping timed
+		// out or the firmware does not implement the ping command. An
+		// authorization rejection still counts: the login is no longer valid.
 		*failures = 0
 	} else {
 		*failures++
@@ -432,4 +439,9 @@ func (c *Client) keepAliveStep(failures *int, lastPackets *uint64) bool {
 		return true
 	}
 	return false
+}
+
+func authRejection(err error) bool {
+	var status *StatusError
+	return errors.As(err, &status) && (status.Code == 401 || status.Code == 403)
 }

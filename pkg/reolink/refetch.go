@@ -108,6 +108,9 @@ func (p *Producer) refetch(old profileInput, cause error) (profileInput, error) 
 	}
 	s := *p.source
 	s.preRecord = refetchSeconds
+	// History playback gets its own connection, so late live frames still in
+	// flight on a shared connection cannot mix into the history replay.
+	s.dedicated = true
 	input, err := p.open(ctx, p.camera, s)
 	if err != nil {
 		p.logRefetch(false, err)

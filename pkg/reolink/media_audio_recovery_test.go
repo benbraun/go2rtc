@@ -2,7 +2,6 @@ package reolink
 
 import (
 	"encoding/binary"
-	"strings"
 	"testing"
 
 	"github.com/AlexxIT/go2rtc/pkg/baichuan"
@@ -32,6 +31,7 @@ func TestAACGapConfirmationWritesBeforeTerminalAndSavesEpoch(t *testing.T) {
 	start := (nowTimestamp(90000) &^ wireMask) + wireWidth - 4500
 	profile.pipeline = mediaPipeline{epoch: mediaEpoch{video: start}, sharedClock: true}
 	profile.pipeline.videoResyncs = &profile.videoResyncs
+	profile.pipeline.audioResyncs = &profile.audioResyncs
 	if err := profile.pipeline.configureVideo(testH264Keyframe(1_000_000)); err != nil {
 		t.Fatal(err)
 	}
@@ -62,10 +62,11 @@ func TestAACGapConfirmationWritesBeforeTerminalAndSavesEpoch(t *testing.T) {
 	if err := profile.writePacket(testH264PFrame(3_025_000)); err != nil {
 		t.Fatalf("intervening P frame: %v", err)
 	}
-	confirmErr := profile.writePacket(bareI(3_050_000))
-	if confirmErr == nil || !strings.Contains(confirmErr.Error(), "video ahead of AAC") {
-		t.Fatalf("persistent gap did not terminate: %v", confirmErr)
+	if err := profile.writePacket(bareI(3_050_000)); err != nil || profile.pipeline.aacGap != 0 ||
+		profile.audioResyncs.Load() != 1 {
+		t.Fatalf("persistent gap did not re-anchor AAC: %v", err)
 	}
+	confirmErr := mediaErrorf("test teardown")
 	confirmed := profile.pipeline.videoTS.value
 	if len(received) != 5 {
 		t.Fatalf("confirmation delivery count = %d, want 5", len(received))
@@ -90,7 +91,8 @@ func TestAACGapConfirmationWritesBeforeTerminalAndSavesEpoch(t *testing.T) {
 		replacement.closeReceivers()
 		replacement.cancel()
 	})
-	if replacement.pipeline.epoch.video != confirmed+1 {
+	// Audio moved up to video, so the replacement may start a few ticks later still.
+	if replacement.pipeline.epoch.video <= confirmed {
 		t.Fatalf("replacement epoch did not advance past emitted confirmation: %d <= %d",
 			replacement.pipeline.epoch.video, confirmed)
 	}

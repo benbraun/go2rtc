@@ -156,6 +156,26 @@ func TestKeepAliveDoesNotExcuseCameraRejection(t *testing.T) {
 	}
 }
 
+func TestKeepAliveExcusesUnsupportedPingWithMediaProgress(t *testing.T) {
+	client, preview := keepAliveTestClient(t, 400)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	failures := 0
+	lastPackets := client.mediaPackets.Load()
+	for i := range 5 {
+		preview.deliver(message{payload: keepAliveVideoFrame()})
+		if packet, err := preview.Read(ctx); err != nil || packet.Kind != MediaVideoP {
+			t.Fatalf("video packet: kind=%d err=%v", packet.Kind, err)
+		}
+		if client.keepAliveStep(&failures, &lastPackets) {
+			t.Fatalf("unsupported ping %d closed a session with media progress", i+1)
+		}
+	}
+	if err := client.Err(); err != nil {
+		t.Fatalf("client failed: %v", err)
+	}
+}
+
 func TestKeepAliveWriteFailureClosesWithMediaProgress(t *testing.T) {
 	cfg, err := NewConfig("camera.local", "admin", "password").normalized()
 	if err != nil {

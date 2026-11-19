@@ -104,14 +104,14 @@ Use `camera_clear` for full-resolution video, listening, and talkback. The fluen
 
 ### Connection layout
 
-A Reolink source uses one authenticated Baichuan connection. Its video, camera audio, and talkback share that connection. This is the recommended layout when one profile provides every required track:
+TCP sources for the same camera, port, and login share one authenticated Baichuan connection: `main`, `sub`, and `extern` of one camera, and every channel of a multi-lens camera or NVR, each run as a preview on it. Video, camera audio, and talkback share that connection. A source gets its own connection only when its transport options (such as `quickack`) differ from the shared one, when another source already carries the same channel and profile, or for a history refetch. One profile still provides every required track in the simplest layout:
 
 ```yaml
 streams:
   camera: reolink://${REOLINK_USER}:${REOLINK_PASSWORD}@camera.local/main?audio=1&backchannel=1
 ```
 
-Use a second source only when you need a separate connection. The following stream gets video from `main`. It gets camera audio and talkback from a separate `sub` connection:
+A second source can supply audio and talkback from another profile. The following stream gets video from `main` and camera audio and talkback from `sub`:
 
 ```yaml
 streams:
@@ -122,18 +122,19 @@ streams:
 
 The second source is a dedicated audio source. `video=0` prevents it from supplying video. It still receives camera audio because `audio=1`, and it supplies talkback because `backchannel=1`.
 
-Set `audio=0` on the second source only when you need a talkback-only source. The source still opens and drains its selected preview, so use `sub` to reduce bandwidth. Either layout consumes another camera session. Use a separate connection only for firmware compatibility or diagnosis.
+Set `audio=0` on the second source only when you need a talkback-only source. The source still opens and drains its selected preview, so use `sub` to reduce bandwidth. Both sources ride the camera's shared connection.
 
 When several sources advertise talkback, go2rtc selects the first compatible source in listed order. Do not rely on that order. Enable `backchannel` on one source only. Separate named streams can each advertise talkback, but concurrent talk sessions on the same camera channel compete for one camera talk endpoint.
 
 ## Behavior
 
-- One source serves all go2rtc consumers. Duplicate configured sources open separate camera sessions.
+- One source serves all go2rtc consumers. A duplicate source for the same channel and profile opens a separate connection.
+- When the camera refuses a login, further logins to it wait 15 seconds, doubling to 5 minutes, and fail locally until then. Fast retries of a rejected login can make the camera lock the account out. Network errors do not start this cooldown.
 - Multiple configured sources retain go2rtc's ordered codec matching. A later H.264 source can serve a consumer that does not negotiate HEVC; `video=0` prevents a source from satisfying video.
 - Connections are demand-driven. When the last consumer detaches, go2rtc stops the source and the adapter synchronously releases its preview, talk, transport, and receivers.
 - The adapter does not guess a camera's session capacity. The camera remains authoritative and may reject a new source when its model-, firmware-, or client-dependent limit is reached.
-- Enabled audio must start within 10 seconds. A profile reconnects after 15 seconds without a valid audio frame. It also reconnects after a 60-second window below 75% of the advertised audio clock. Set `audio=0` when the camera microphone is absent or disabled, or incoming audio is unwanted.
-- If video remains more than one second ahead of AAC across two distinct keyframes, the source reconnects. Valid video continues until the reconnect.
+- Enabled audio must start within 10 seconds. Set `audio=0` when the camera microphone is absent or disabled, or incoming audio is unwanted.
+- Audio problems do not interrupt video. After 15 seconds without audio, the source logs one warning and keeps video running. If video stays more than one second ahead of AAC across two distinct keyframes, the AAC clock jumps forward to the video clock, which leaves a short audio gap. An audio-only source still reconnects after 15 seconds without audio or after a 60-second window below 75% of the advertised audio clock.
 - Media framing errors trigger bounded recovery. Discarded or truncated media suppresses video until a valid keyframe. The source reconnects if recovery fails.
 - During media recovery, video profiles configured with `audio=0` can recover timestamp gaps up to 60 seconds after two validated keyframes with matching codec settings. Audio-enabled profiles keep the 30-second clock limit. This recovery does not synchronize audio from a separate source.
 - Best-effort setup queries run concurrently per configured source and add compact model, firmware, channel, and discovery status. Rejected queries and query timeouts do not prevent streaming. Malformed or oversized replies can close the connection.
@@ -146,6 +147,8 @@ The `reolink` producer object includes these counters. They start at zero for ea
 - `boundary_adjustments` counts I-frame boundaries that differ from declared sizes. This includes padding repairs.
 - `short_video_units` counts shortened I-frame units detected by the parser, including during startup.
 - `video_resyncs` counts successful returns to synchronized video.
+- `audio_resyncs` counts AAC clock jumps forward to the video clock.
+- `audio_stalls` counts audio stalls that video ran through.
 
 The counters overlap. For troubleshooting, copy the `reolink` object and include the camera model and firmware version.
 

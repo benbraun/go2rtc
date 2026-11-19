@@ -26,7 +26,6 @@ func TestProfileFailsWhenAdvertisedTrackStalls(t *testing.T) {
 		closeErr error
 	}{
 		{name: "video", packet: testAAC, want: "video track stalled"},
-		{name: "audio", packet: testH264PFrame, want: "audio track stalled", closeErr: context.Canceled},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			opener := &fakeProfileOpener{}
@@ -145,46 +144,47 @@ func TestBackchannelOnlyProfileStallsWithoutMedia(t *testing.T) {
 	}
 }
 
-func TestProfileReconnectsAfterLowAudioRate(t *testing.T) {
+func TestProfileKeepsVideoAtLowAudioRate(t *testing.T) {
 	opener := &fakeProfileOpener{}
 	registry := testRegistry(opener.open)
-	const source = "reolink://admin:secret@camera/main?backchannel=0"
-	first, err := registry.Dial(source)
+	producer, err := registry.Dial("reolink://admin:secret@camera/main?backchannel=0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	setTestTrackHealth(first, 300*time.Millisecond, 500*time.Millisecond)
-	firstDone := make(chan error, 1)
-	go func() { firstDone <- first.Start() }()
+	t.Cleanup(func() { _ = producer.Stop() })
+	setTestTrackHealth(producer, 300*time.Millisecond, 500*time.Millisecond)
+	done := make(chan error, 1)
+	go func() { done <- producer.Start() }()
 	input := opener.input(0)
-	err = runProfileTraffic(input, firstDone, 20*time.Millisecond, 200*time.Millisecond, 20*time.Millisecond, 2*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "audio track rate below expected") {
-		t.Fatalf("unexpected under-rate result: %v", err)
+	if err = runProfileTraffic(input, done, 20*time.Millisecond, 200*time.Millisecond, 20*time.Millisecond, 2*time.Second); err != nil {
+		t.Fatalf("low audio rate stopped video: %v", err)
 	}
-	if class := first.diagnostics().LastError; class != "media" {
-		t.Fatalf("under-rate failure classified as %q", class)
+	input.results <- inputResult{err: io.EOF}
+	if err = <-done; !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected terminal error: %v", err)
 	}
+}
 
-	replacement, err := registry.Dial(source)
+func TestProfileKeepsVideoWhenAudioStalls(t *testing.T) {
+	opener := &fakeProfileOpener{}
+	producer, err := testRegistry(opener.open).Dial("reolink://admin:secret@camera/main?backchannel=0")
 	if err != nil {
-		t.Fatalf("replacement profile failed: %v", err)
-	}
-	setTestTrackHealth(replacement, 300*time.Millisecond, 300*time.Millisecond)
-	replacementDone := make(chan error, 1)
-	go func() { replacementDone <- replacement.Start() }()
-	input = opener.input(1)
-	if err = runProfileTraffic(input, replacementDone, 20*time.Millisecond, 50*time.Millisecond, 20*time.Millisecond, time.Second); err != nil {
-		t.Fatalf("full-rate replacement stopped: %v", err)
-	}
-	if err = first.Stop(); err != nil {
-		t.Fatalf("failed to stop terminal profile: %v", err)
-	}
-	input.results <- inputResult{err: io.ErrUnexpectedEOF}
-	if err = <-replacementDone; !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("unexpected replacement terminal error: %v", err)
-	}
-	if err = replacement.Stop(); err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = producer.Stop() })
+	setTestTrackHealth(producer, 100*time.Millisecond, 200*time.Millisecond)
+	done := make(chan error, 1)
+	go func() { done <- producer.Start() }()
+	input := opener.input(0)
+	if err = runProfileTraffic(input, done, 20*time.Millisecond, time.Hour, 20*time.Millisecond, 600*time.Millisecond); err != nil {
+		t.Fatalf("audio stall stopped video: %v", err)
+	}
+	if stalls := producer.audioStalls.Load(); stalls != 1 {
+		t.Fatalf("audio stalls = %d, want 1", stalls)
+	}
+	input.results <- inputResult{err: io.EOF}
+	if err = <-done; !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected terminal error: %v", err)
 	}
 }
 
@@ -249,14 +249,9 @@ func TestProfileAudioRateFollowsVideoProgress(t *testing.T) {
 			input := opener.input(0)
 			// One AAC packet and one video step each represent 64ms of content.
 			err = runProfileTraffic(input, done, 128*time.Millisecond, test.audioEvery, 64*time.Millisecond, 2200*time.Millisecond)
-			if test.low {
-				if err == nil || !strings.Contains(err.Error(), "audio track rate below expected") {
-					t.Fatalf("audio starvation was not detected: %v", err)
-				}
-				return
-			}
 			if err != nil {
-				t.Fatalf("common backlog terminated: %v", err)
+				// Slow audio no longer reconnects a source that still has video.
+				t.Fatalf("%s terminated: %v", test.name, err)
 			}
 			input.results <- inputResult{err: io.EOF}
 			if err = <-done; !errors.Is(err, io.EOF) {

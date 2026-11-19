@@ -21,6 +21,7 @@ type source struct {
 	suppressVideo bool
 	suppressAudio bool
 	refetch       bool
+	dedicated     bool // Open a separate connection instead of the camera's shared one.
 	preRecord     uint8
 	username      string
 	password      string
@@ -43,7 +44,8 @@ func parseURL(rawURL string) (source, error) {
 	}
 	username := u.User.Username()
 	password, _ := u.User.Password()
-	creds.AddSecret(username)
+	// The username is not a secret. Registering it would mask every occurrence
+	// of that word in logs and API responses (all of "frigate", or every "a").
 	creds.AddSecret(password)
 
 	query, err := url.ParseQuery(u.RawQuery)
